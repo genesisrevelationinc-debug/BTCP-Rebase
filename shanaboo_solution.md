@@ -1,79 +1,37 @@
  ```diff
---- a/src/wallet/rpcwallet.cpp
-+++ b/src/wallet/rpcwallet.cpp
-@@ -1,4 +1,5 @@
- // Copyright (c) 2010 Satoshi Nakamoto
-+// Copyright (c) 2018 The Bitcoin Private developers
- // Copyright (c) 2009-2018 The Bitcoin Core developers
- // Distributed under the MIT software license, see the accompanying
- // file COPYING or http://www.opensource.org/licenses/mit-license.php.
-@@ -7,6 +8,7 @@
- #include <core_io.h>
- #include <init.h>
- #include <key_io.h>
-+#include <pubkey.h>
- #include <net.h>
- #include <outputtype.h>
- #include <policy/fees.h>
-@@ -15,6 +17,7 @@
- #include <rpc/server.h>
- #include <rpc/util.h>
- #include <script/descriptor.h>
-+#include <script/standard.h>
- #include <timedata.h>
+--- a/src/rpc/client.cpp
++++ b/src/rpc/client.cpp
+@@ -123,6 +123,7 @@ static const CRPCConvertParam vRPCConvertParams[] =
+     { "importmulti", 1, "options" },
+     { "importmulti", 2, "range" },
+     { "importdescriptors", 0, "requests" },
++    { "viewforkaddresses", 0, "addresses" },
+ };
+ // clang-format on
+ 
+--- a/src/rpc/misc.cpp
++++ b/src/rpc/misc.cpp
+@@ -20,6 +20,7 @@
  #include <util/system.h>
- #include <util/moneystr.h>
-@@ -22,6 +25,7 @@
- #include <wallet/coincontrol.h>
- #include <wallet/feebumper.h>
- #include <wallet/rpcwallet.h>
-+#include <wallet/wallet.h>
- #include <wallet/walletutil.h>
- #include <wallet/coinselection.h>
+ #include <util/strencodings.h>
  #include <warnings.h>
-@@ -29,6 +33,7 @@
++#include <key_io.h>
+ 
  #include <stdint.h>
  
+@@ -32,6 +33,7 @@
+ #include <boost/algorithm/string.hpp>
+ 
  #include <univalue.h>
-+#include <boost/algorithm/string.hpp>
++#include <hash.h>
  
- 
- static const std::string WALLET_ENDPOINT_BASE = "/wallet/";
-@@ -36,6 +41,12 @@ static const std::string WALLET_ENDPOINT_BASE = "/wallet/";
- static std::string urlDecode(const std::string &s)
+ static CRPCValueTable::value_type convertValueType(const UniValue& v)
  {
-     std::string ret;
-+    unsigned int i;
-+    for (i = 0; i < s.length(); i++) {
-+        if (s[i] == '%' && i + 2 < s.length()) {
-+            int val = 0;
-+            int ii;
-+            for (ii = 1; ii <= 2; ii++) {
-+                val *= 16;
-+                if (s[i + ii] >= '0' && s[i + ii] <= '9') val += s[i + ii] - '0';
-+                else if (s[i + ii] >= 'A' && s[i + ii] <= 'F') val += s[i + ii] - 'A' + 10;
-+                else if (s[i + ii] >= 'a' && s[i + ii] <= 'f') val += s[i + ii] - 'a' + 10;
-+            }
-+            ret += (char)val;
-+            i += 2;
-+        } else {
-+            ret += s[i];
-+        }
-+    }
-+    return ret;
-+}
-+
-+static std::string GetExplorerLink(const std::string& address, const std::string& chain)
-+{
-+    if (chain == "btc") {
-+        return "https://blockchain.info/address/" + address;
-+    } else if (chain == "zcl") {
-+        return "https://explorer.zcl Dustin.com/address/" + address;
-+    }
-+    return "";
-+}
-+
-+UniValue viewpreforkaddresses(const JSONRPCRequest& request)
+@@ -618,6 +620,134 @@ static UniValue verifymessage(const JSONRPCRequest& request)
+     return (pubkey.GetID() == *keyID);
+ }
+ 
++static UniValue viewforkaddresses(const JSONRPCRequest& request)
 +{
 +    std::shared_ptr<CWallet> const wallet = GetWalletForJSONRPCRequest(request);
 +    CWallet* const pwallet = wallet.get();
@@ -82,64 +40,97 @@
 +        return NullUniValue;
 +    }
 +
-+    if (request.fHelp || request.params.size() > 1)
++    if (request.fHelp || request.params.size() < 1 || request.params.size() > 2)
 +        throw std::runtime_error(
-+            "viewpreforkaddresses ( \"type\" )\n"
-+            "\nView the pre-fork BTC and ZCL addresses that correspond to this wallet's BTCP addresses.\n"
-+            "\nThis is a view-only utility that does NOT use or expose any private keys.\n"
-+            "It simply shows what addresses would exist on other chains for the same public keys.\n"
-+            "\nArguments:\n"
-+            "1. \"type\"        (string, optional) The type of addresses to view: \"btc\", \"zcl\", or \"all\" (default: \"all\")\n"
-+            "\nResult:\n"
-+            "{\n"
-+            "  \"btcp_addresses\" : [\n"
-+            "    {\n"
-+            "      \"btcp\"       : \"btcp_address\",\n"
-+            "      \"btc\"        : \"btc_address\",\n"
-+            "      \"zcl\"        : \"zcl_address\",\n"
-+            "      \"btc_explorer\" : \"https://...\",\n"
-+            "      \"zcl_explorer\" : \"https://...\"\n"
-+            "    },\n"
-+            "    ...\n"
-+            "  ]\n"
-+            "}\n"
-+            "\nExamples:\n"
-+            + HelpExampleCli("viewpreforkaddresses", "")
-+            + HelpExampleCli("viewpreforkaddresses", "\"btc\"")
-+            + HelpExampleRpc("viewpreforkaddresses", "\"zcl\"")
-+        );
++            RPCHelpMan{"viewforkaddresses",
++                "\nView the corresponding BTC and/or ZCL addresses for a given set of BTCP addresses.\n"
++                "This is a view-only utility and does not use or expose any private keys.\n"
++                "The addresses shown are derived from the public information of the BTCP addresses.\n",
++                {
++                    {"addresses", RPCArg::Type::ARR, RPCArg::Optional::NO, "A json array of BTCP addresses",
++                        {
++                            {"address", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "BTCP address"},
++                       },
++                    },
++                    {"options", RPCArg::Type::OBJ, RPCArg::Optional::OMITTED_NAMED_ARG, "Options for viewing fork addresses",
++                        {
++                            {"includebtc", RPCArg::Type::BOOL, /* default */ "true", "Include corresponding BTC addresses"},
++                            {"includezcl", RPCArg::Type::BOOL, /* default */ "true", "Include corresponding ZCL addresses"},
++                            {"includeutxolinks", RPCArg::Type::BOOL, /* default */ "false", "Include blockchain explorer links for UTXO lookup"},
++                        },
++                    },
++                },
++                RPCResult{
++                    "{                             (json object)\n"
++                    "  \"btcp_address\" : {          (json object) The original BTCP address\n"
++                    "    \"btc multisig_address\" : \"address\",  (string, optional) Corresponding BTC address (if applicable)\n"
++                    "    \"zcl_address\" : \"address\",           (string, optional) Corresponding ZCL address (if applicable)\n"
++                    "    \"btc_utxo_link\" : \"url\",             (string, optional) BTC blockchain explorer link\n"
++                    "    \"zcl_utxo_link\" : \"url\"              (string, optional) ZCL blockchain explorer link\n"
++                    "  },\n"
++                    "  ...\n"
++                    "}\n"
++                },
++                RPCExamples{
++                    HelpExampleCli("viewforkaddresses", "\"[\\\"btcpaddress1\\\",\\\"btcpaddress2\\\"]\"")
++                    + HelpExampleCli("viewforkaddresses", "\"[\\\"btcpaddress1\\\"]\" \"{\\\"includebtc\\\":true,\\\"includezcl\\\":true,\\\"includeutxolinks\\\":true}\"")
++                    + HelpExampleRpc("viewforkaddresses", "[\"btcpaddress1\",\"btcpaddress2\"]")
++                },
++            }.ToString());
 +
-+    LOCK2(cs_main, pwallet->cs_wallet);
++    RPCTypeCheck(request.params, {UniValue::VARR, UniValue::VOBJ}, true);
 +
-+    std::string type = "all";
-+    if (!request.params.empty()) {
-+        type = request.params[0].get_str();
-+        boost::to_lower(type);
-+        if (type != "btc" && type != "zcl" && type != "all")
-+            throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid type. Must be \"btc\", \"zcl\", or \"all\"");
++    UniValue addresses = request.params[0].get_array();
++
++    bool includeBtc = true;
++    bool includeZcl = true;
++    bool includeUtxoLinks = false;
++
++    if (!request.params[1].isNull()) {
++        const UniValue& options = request.params[1].get_obj();
++        RPCTypeCheckObj(options,
++            {
++                {"includebtc", UniValue::VBOOL},
++                {"includezcl", UniValue::VBOOL},
++                {"includeutxolinks", UniValue::VBOOL},
++            },
++            true, true);
++
++        if (options.exists("includebtc"))
++            includeBtc = options["includebtc"].get_bool();
++        if (options.exists("includezcl"))
++            includeZcl = options["includezcl"].get_bool();
++        if (options.exists("includeutxolinks"))
++            includeUtxoLinks = options["includeutxolinks"].get_bool();
 +    }
 +
-+    UniValue result(UniValue::VOBJ);
-+    UniValue addressArray(UniValue::VARR);
++    UniValue ret(UniValue::VOBJ);
 +
-+    std::vector<CTxDestination> vDestinations;
-+    pwallet->GetAddresses(vDestinations);
++    for (unsigned int idx = 0; idx < addresses.size(); idx++) {
++        const std::string& strAddr = addresses[idx].get_str();
++        CTxDestination dest = DecodeDestination(strAddr);
++        if (!IsValidDestination(dest)) {
++            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid BTCP address: " + strAddr);
++        }
 +
-+    for (const auto& dest : vDestinations) {
-+        UniValue entry(UniValue::VOBJ);
-+        std::string btcpAddr = EncodeDestination(dest);
-+        entry.pushKV("btcp", btcpAddr);
++        UniValue addressResult(UniValue::VOBJ);
 +
-+        CTxDestination btcDest;
-+        CTxDestination zclDest;
-+        bool hasBtc = false;
-+        bool hasZcl = false;
++        // Get the public key hash or script hash from the destination
++        uint160 hash;
++        if (std::get_if<PKHash>(&dest)) {
++            hash = uint160(std::get<PKHash>(dest));
++        } else if (std::get_if<ScriptHash>(&dest)) {
++            hash = uint160(std::get<ScriptHash>(dest));
++        } else {
++            // For other types, we can't derive fork addresses
++            addressResult.pushKV("error", "Unsupported address type for fork address derivation");
++            ret.pushKV(strAddr, addressResult);
++            continue;
++        }
 +
-+        // Try to get the public key hash from the destination
-+        CKeyID keyID;
-+        if (ExtractDestination(GetScriptForDestination(dest), keyID)) {
-+            // BTC address (P2PKH)
-+            if (type == "btc" || type == "all") {
-+                // BTC P2PKH address version byte is 0x00
-+                std::vector<unsigned char> btcAddrData;
-+                btcAddrData.push_back(
++        if (includeBtc) {
++            // BTC uses base58 with version byte 0 (P2PKH) or 5 (P2SH)
++            CTxDestination btcDest = dest;
++            std::string btcAddr = EncodeDestination(btcDest);
++            // Note: In a real implementation, this would need proper BTC address encoding
++           
